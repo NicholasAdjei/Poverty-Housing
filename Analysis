@@ -1,38 +1,103 @@
--------------------------------------------------------------------------------
-* Step 1: Construct Group-based multi-trajectory model for poverty and poor housing
-* -------------------------------------------------------------------------------
-*create a time variable 
-forval i = 1/5 { 
-  generate t_`i' = `i'
-}
-recode t_1 (1= 0) 
-recode t_2 (2= 3) 
-recode t_3 (3= 5) 
-recode t_4 (4= 7) 
-recode t_5 (5= 11) 
+/*******************************************************************************
+Project: Joint trajectories of poverty and poor housing and adolescent outcomes
+Purpose: Reproducible analysis code for GitHub
+Author: Nicholas
+Software: Stata 18
+*******************************************************************************/
 
-*Best fit (4-class solution)
-traj, multgroups(4) var1(poverty_*) indep1(t_*) order1(3 3 3 3) model1(logit) ///
-      var2(housingQ_*) indep2(t_*) order2(3 3 3 3) model2(logit)
+version 18
+clear all
+set more off
+set maxvar 30000
+
+*------------------------------------------------------------*
+* 0. Define paths
+*------------------------------------------------------------*
+global datafile "C:\Users\Papanick\Desktop\PRU_Project\Housing_PRU_P2\mcs1_7_nicholas_analysis.dta"
+global datawrk  "C:\Users\Papanick\Desktop\PRU_Project\Housing_PRU_P2"
+global output   "C:\Users\Papanick\Desktop\PRU_Project\Housing_PRU_P2\output"
+
+capture mkdir "$output"
+
+*------------------------------------------------------------*
+* 1. Check required packages
+*------------------------------------------------------------*
+capture which traj
+if _rc {
+    di as error "Package 'traj' is not installed."
+    exit 199
+}
+
+capture which esttab
+if _rc {
+    di as error "Package 'esttab' is not installed."
+    exit 199
+}
+
+capture which punaf
+if _rc {
+    di as error "Package 'punaf' is not installed."
+    exit 199
+}
+
+*------------------------------------------------------------*
+* 2. Load data and define survey design
+*------------------------------------------------------------*
+use "$datafile", clear
+
+drop if eovwt2 == -1
+
+svyset, clear
+svyset [pweight=eovwt2], strata(pttype2) psu(sptn00) fpc(nh2)
+
+*------------------------------------------------------------*
+* 3. Create time variables for trajectory modelling
+*------------------------------------------------------------*
+forvalues i = 1/5 {
+    gen t_`i' = `i'
+}
+
+recode t_1 (1 = 0)
+recode t_2 (2 = 3)
+recode t_3 (3 = 5)
+recode t_4 (4 = 7)
+recode t_5 (5 = 11)
+
+*------------------------------------------------------------*
+* 4. Fit joint multi-trajectory model
+*------------------------------------------------------------*
+traj, multgroups(4) ///
+    var1(poverty_*) indep1(t_*) order1(3 3 3 3) model1(logit) ///
+    var2(housingQ_*) indep2(t_*) order2(3 3 3 3) model2(logit)
 
 multtrajplot, xtitle(Age) ///
-             ytitle1("Poverty") ytitle2("Poor housing") ///
-             ylabel1(0(0.2)1) ylabel2(0(0.2)1)
+    ytitle1("Poverty") ytitle2("Poor housing") ///
+    ylabel1(0(0.2)1) ylabel2(0(0.2)1)
 
-* Fit other classes (1-5 classes)
+save "$datawrk\mcs_with_traj.dta", replace
+
+*------------------------------------------------------------*
+* 5. Compare 1- to 5-class solutions using BIC
+*------------------------------------------------------------*
+tempfile bicres
+tempname mem
+
+postfile `mem' groups bic using `bicres', replace
+
 forvalues g = 1/5 {
     di as text "Fitting model with `g' groups"
-    capture noisily traj ///
-        , var1(poverty_*) ///
-          indep1(t_*) ///
-          var2(housingQ_*) ///
-          indep2(t_*) ///
-          model(logit) ///
-          order(3 3) ///
-          group(`g')
+
+    capture noisily traj, ///
+        var1(poverty_*) ///
+        indep1(t_*) ///
+        var2(housingQ_*) ///
+        indep2(t_*) ///
+        model(logit) ///
+        order(3 3) ///
+        group(`g')
 
     if _rc {
-        di as error "Model failed for `g' groups — skipped."
+        di as error "Model failed for `g' groups. Skipping."
         continue
     }
 
@@ -48,182 +113,216 @@ postclose `mem'
 use `bicres', clear
 sort bic
 list, sepby(groups)
+save "$output\bic_trajectory_models.dta", replace
 
-di as result "Lowest BIC (best-fitting model):"
+di as result "Lowest BIC solution:"
 list in 1
 
-*Fit stats for AvePP and Occ
-program summary_table_procTraj_Housing
+use "$datawrk\mcs_with_traj.dta", clear
+
+svyset, clear
+svyset [pweight=eovwt2], strata(pttype2) psu(sptn00) fpc(nh2)
+
+*------------------------------------------------------------*
+* 6. Define trajectory group variable
+*------------------------------------------------------------*
+capture drop traj_ph
+gen traj_ph = _traj_Group
+
+label define trajph_lbl ///
+    1 "Not in poverty or poor housing" ///
+    2 "Not in poverty but in poor housing" ///
+    3 "In poverty but not in poor housing" ///
+    4 "In persistent poverty and poor housing", replace
+
+label values traj_ph trajph_lbl
+
+*------------------------------------------------------------*
+* 7. Summarise class assignment quality
+*------------------------------------------------------------*
+capture program drop summary_table_procTraj_Housing
+program define summary_table_procTraj_Housing
     preserve
-	gen Mp = 0
-	foreach i of varlist _traj_ProbG* {
-	    replace Mp = `i' if `i' > Mp 
-	}
+
+    gen Mp = 0
+    foreach i of varlist _traj_ProbG* {
+        replace Mp = `i' if `i' > Mp
+    }
+
     sort _traj_Group
-    *and the odds of correct classification
     by _traj_Group: gen countG = _N
     by _traj_Group: egen groupAPP = mean(Mp)
     by _traj_Group: gen counter = _n
-    gen n = groupAPP/(1 - groupAPP)
-    gen p = countG/ _N
-    gen d = p/(1-p)
-    gen occ = n/d
-    *Estimated proportion for each group
+
+    gen n = groupAPP / (1 - groupAPP)
+    gen p = countG / _N
+    gen d = p / (1 - p)
+    gen occ = n / d
+
     scalar c = 0
     gen TotProb = 0
     foreach i of varlist _traj_ProbG* {
-       scalar c = c + 1
-       quietly summarize `i'
-       replace TotProb = r(sum)/ _N if _traj_Group == c 
+        scalar c = c + 1
+        quietly summarize `i'
+        replace TotProb = r(sum) / _N if _traj_Group == c
     }
-	gen d_pp = TotProb/(1 - TotProb)
-	gen occ_pp = n/d_pp
-    *This displays the group number [_traj_~p], 
-    *the count per group (based on the max post prob), [countG]
-    *the average posterior probability for each group, [groupAPP]
-    *the odds of correct classification (based on the max post prob group assignment), [occ] 
-    *the odds of correct classification (based on the weighted post. prob), [occ_pp]
-    *and the observed probability of groups versus the probability [p]
-    *based on the posterior probabilities [TotProb]
+
+    gen d_pp = TotProb / (1 - TotProb)
+    gen occ_pp = n / d_pp
+
     list _traj_Group countG groupAPP occ occ_pp p TotProb if counter == 1
-	
-	list _traj_Group countG groupAPP occ occ_pp  p if counter == 1
-	
+
     restore
 end
-summary_table_procTraj_Housing
-		  
-* ------------------------------------------------------------
-* Step 2: Main logistic models for all outcomes
-* ------------------------------------------------------------
-local outcomes "mh_prob_17 poor_exam_17 poor_srh_17 asthma14 police17"
 
+summary_table_procTraj_Housing
+
+*------------------------------------------------------------*
+* 8. Define outcomes
+*------------------------------------------------------------*
+local outcomes "mh_prob_17 poor_exam_17 poor_srh_17 asthma14 police14"
+
+*------------------------------------------------------------*
+* 9. Main complete-case Poisson models
+*------------------------------------------------------------*
 foreach y of local outcomes {
-    quietly logistic `y' i.traj_ph i.sex i.medu i.meth [pweight = govwt2]
-    estimates store m_`y'
-    * Margins and ORs
-    esttab m_`y' using "$output/logit_`y'.rtf", replace b(%9.2f) se(%9.2f) eform
+    quietly svy: poisson `y' i.traj_ph i.sex i.medu i.meth
+    estimates store cc_`y'
 }
 
-* ------------------------------------------------------------
-* Step 3: Multiple imputation by chained equations (25 datasets)
-* -----------------------------------------------------------
- *remove any old mi characteristics stuck on the dataset ---
+esttab cc_mh_prob_17 cc_poor_exam_17 cc_poor_srh_17 cc_asthma14 cc_police17 ///
+    using "$output\table_complete_case_poisson.rtf", ///
+    replace eform b(%9.2f) se(%9.2f) label ///
+    mtitles("Mental health" "Poor exam results" "Poor SRH" "Asthma" "Police contact")
+
+*------------------------------------------------------------*
+* 10. Multiple imputation
+*------------------------------------------------------------*
 foreach c in _mi_style _mi_m _mi_ivars _mi_rvars _mi_pvars _mi_n _mi_update _mi_passive {
     capture char _dta[`c']
 }
 
-* Register variables
 mi set wide
 
-* Imputed variables
 mi register imputed mh_prob_17 poor_exam_17 poor_srh_17 asthma14 police17 ///
-    sex medu meth
+    medu meth
 
-* Not imputed
-mi register regular mcsid traj_ph 
+mi register regular mcsid traj_ph sex eovwt2 pttype2 sptn00 nh2
 
-* Imputation model
-mi impute chained (logit) mh_prob_17 poor_exam_17 poor_srh_17 asthma14 police17 ///
-                  (mlogit) medu meth ///
-                  = i.traj_ph i.sex, add(25) rseed(8787)
-                  
-* Fit the same logistic models on imputed data
-local outcomes "mh_prob_17 poor_exam_17 poor_srh_17 asthma14 police17"
+mi impute chained ///
+    (logit) mh_prob_17 poor_exam_17 poor_srh_17 asthma14 police17 ///
+    (mlogit) medu meth ///
+    = i.traj_ph i.sex, add(25) rseed(8787)
+
+svyset, clear
+svyset [pweight=eovwt2], strata(pttype2) psu(sptn00) fpc(nh2)
 
 foreach y of local outcomes {
-    mi estimate, or: logistic `y' i.traj_ph i.sex i.medu i.meth [pweight = govwt2]
+    mi estimate, eform: svy: poisson `y' i.traj_ph i.sex i.medu i.meth
     estimates store mi_`y'
 }
 
+esttab mi_mh_prob_17 mi_poor_exam_17 mi_poor_srh_17 mi_asthma14 mi_police17 ///
+    using "$output\table_mi_poisson.rtf", ///
+    replace eform b(%9.2f) se(%9.2f) label ///
+    mtitles("Mental health" "Poor exam results" "Poor SRH" "Asthma" "Police contact")
 
-* ------------------------------------------------------------
-* Step 4: Model based PAFs for each outcome vs lowest-risk trajectory
-* ------------------------------------------------------------
-local outcomes "mh_prob_17 poor_exam_17 poor_srh_17 asthma14 police17"
+*------------------------------------------------------------*
+* 11. Population attributable fractions
+*------------------------------------------------------------*
+tempfile pafall
+tempname pafmem
+
+postfile `pafmem' str25 outcome double(paf lb ub) using `pafall', replace
 
 foreach y of local outcomes {
-    * Fit model
-    quietly logistic `y' i.traj_ph i.sex i.medu i.meth [pweight = govwt2]
-    * Counterfactual where all are in traj_ph==1
-    punaf, at(traj_ph=1)
-    matrix b = r(b)
+    quietly poisson `y' i.traj_ph i.sex i.medu i.meth ///
+        [pweight=eovwt2], vce(robust)
+
+    capture noisily punaf, at(traj_ph=1)
+
+    if _rc {
+        di as error "punaf failed for outcome `y'. Skipping."
+        continue
+    }
+
+    matrix b  = r(b)
     matrix ci = r(ci)
-    * Save to dataset
-    postutil clear
-    tempfile t
-    postfile pf str20 outcome double(paf lb ub) using `t'
-    post pf ("`y'") (b[1,1]) (ci[1,1]) (ci[1,2])
-    postclose
-    use `t', clear
-    save "$output/paf_`y'.dta", replace
+
+    post `pafmem' ("`y'") (b[1,1]) (ci[1,1]) (ci[1,2])
 }
 
-* ------------------------------------------------------------
-* Step 5: Vermunt three-step correction
-* ------------------------------------------------------------
-* Step 1. Measurement model
-* Joint trajectory model already estimated 
-* Posterior probabilities trajprob1–trajprob4 and modal class traj_ph are present.
+postclose `pafmem'
 
-use "$datawrk/mcs_with_traj.dta", clear
+use `pafall', clear
+list
+export delimited using "$output\paf_all_outcomes.csv", replace
+save "$output\paf_all_outcomes.dta", replace
+
+*------------------------------------------------------------*
+* 12. Vermunt three-step correction
+*------------------------------------------------------------*
+use "$datawrk\mcs_with_traj.dta", clear
+
+capture drop traj_ph
+gen traj_ph = _traj_Group
+label values traj_ph trajph_lbl
+
 local K = 4
 
-* Step 2. Misclassification matrix  R = { r_kl = P(Zhat=k | Z=l) }
 tempname R
-matrix `R' = J(`K',`K',.)
+matrix `R' = J(`K', `K', .)
 
 forvalues l = 1/`K' {
     preserve
-    keep if traj_ph==`l'
+    keep if traj_ph == `l'
     forvalues k = 1/`K' {
-        quietly su trajprob`k'
-        matrix `R'[`k',`l'] = r(mean)
+        quietly summarize _traj_ProbG`k'
+        matrix `R'[`k', `l'] = r(mean)
     }
     restore
 }
+
 matrix list `R'
 
-* Step 3. Structural model with correction
-* Estimate P(Z_i=l | X_i) and integrate over true class.
-
 mlogit traj_ph i.sex i.medu i.meth, baseoutcome(1)
+
 forvalues l = 1/`K' {
     predict pZ_`l', outcome(`l')
 }
 
 gen long id = _n
 expand `K'
-bys id: gen latent=_n
+bysort id: gen latent = _n
 
 gen r_kl = .
 forvalues k = 1/`K' {
     forvalues l = 1/`K' {
-        quietly replace r_kl=`R'[`k',`l'] if traj_ph==`k' & latent==`l'
+        quietly replace r_kl = `R'[`k',`l'] if traj_ph == `k' & latent == `l'
     }
 }
 
 gen pZ_l = .
 forvalues l = 1/`K' {
-    quietly replace pZ_l=pZ_`l' if latent==`l'
+    quietly replace pZ_l = pZ_`l' if latent == `l'
 }
 
 gen w_verm = r_kl * pZ_l
-drop if missing(w_verm) | w_verm==0
+drop if missing(w_verm) | w_verm == 0
 
-* Fit bias-adjusted outcome models
-local outcomes "mh_prob_17 poor_exam_17 poor_srh_17 asthma14 police17"
 foreach y of local outcomes {
-    quietly logistic `y' i.latent i.sex i.medu i.meth [pweight=w_verm]
+    quietly poisson `y' i.latent i.sex i.medu i.meth ///
+        [pweight=w_verm], vce(robust)
     estimates store verm_`y'
 }
 
-****************END*************************************************************
+esttab verm_mh_prob_17 verm_poor_exam_17 verm_poor_srh_17 verm_asthma14 verm_police17 ///
+    using "$output\table_vermunt_poisson.rtf", ///
+    replace eform b(%9.2f) se(%9.2f) label ///
+    mtitles("Mental health" "Poor exam results" "Poor SRH" "Asthma" "Police contact")
 
+save "$output\vermunt_analysis_file.dta", replace
 
-
-
-
-
-
-
+*------------------------------------------------------------*
+* End
+*------------------------------------------------------------*
