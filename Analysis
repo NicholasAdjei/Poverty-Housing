@@ -1,14 +1,9 @@
 /*******************************************************************************
 Project: Joint trajectories of poverty and poor housing and adolescent outcomes
 Purpose: Reproducible analysis code for GitHub
-Author: Nicholas
-Software: Stata 18
+Author: Dr Nicholas Kofi Adjei
+Software: Stata 19.0
 *******************************************************************************/
-
-version 18
-clear all
-set more off
-set maxvar 30000
 
 *------------------------------------------------------------*
 * 0. Define paths
@@ -16,42 +11,17 @@ set maxvar 30000
 global datafile "C:\Users\Papanick\Desktop\PRU_Project\Housing_PRU_P2\mcs1_7_nicholas_analysis.dta"
 global datawrk  "C:\Users\Papanick\Desktop\PRU_Project\Housing_PRU_P2"
 global output   "C:\Users\Papanick\Desktop\PRU_Project\Housing_PRU_P2\output"
-
 capture mkdir "$output"
 
 *------------------------------------------------------------*
-* 1. Check required packages
-*------------------------------------------------------------*
-capture which traj
-if _rc {
-    di as error "Package 'traj' is not installed."
-    exit 199
-}
-
-capture which esttab
-if _rc {
-    di as error "Package 'esttab' is not installed."
-    exit 199
-}
-
-capture which punaf
-if _rc {
-    di as error "Package 'punaf' is not installed."
-    exit 199
-}
-
-*------------------------------------------------------------*
-* 2. Load data and define survey design
+* 1. Load data and define survey design
 *------------------------------------------------------------*
 use "$datafile", clear
-
 drop if eovwt2 == -1
-
 svyset, clear
 svyset [pweight=eovwt2], strata(pttype2) psu(sptn00) fpc(nh2)
-
 *------------------------------------------------------------*
-* 3. Create time variables for trajectory modelling
+* 2. Create time variables for trajectory modelling
 *------------------------------------------------------------*
 forvalues i = 1/5 {
     gen t_`i' = `i'
@@ -64,7 +34,7 @@ recode t_4 (4 = 7)
 recode t_5 (5 = 11)
 
 *------------------------------------------------------------*
-* 4. Fit joint multi-trajectory model
+* 3. Fit joint multi-trajectory model
 *------------------------------------------------------------*
 traj, multgroups(4) ///
     var1(poverty_*) indep1(t_*) order1(3 3 3 3) model1(logit) ///
@@ -77,7 +47,7 @@ multtrajplot, xtitle(Age) ///
 save "$datawrk\mcs_with_traj.dta", replace
 
 *------------------------------------------------------------*
-* 5. Compare 1- to 5-class solutions using BIC
+* 4. Compare 1- to 5-class solutions using BIC
 *------------------------------------------------------------*
 tempfile bicres
 tempname mem
@@ -124,7 +94,7 @@ svyset, clear
 svyset [pweight=eovwt2], strata(pttype2) psu(sptn00) fpc(nh2)
 
 *------------------------------------------------------------*
-* 6. Define trajectory group variable
+* 5. Define trajectory group variable
 *------------------------------------------------------------*
 capture drop traj_ph
 gen traj_ph = _traj_Group
@@ -138,7 +108,7 @@ label define trajph_lbl ///
 label values traj_ph trajph_lbl
 
 *------------------------------------------------------------*
-* 7. Summarise class assignment quality
+* 6. Summarise class assignment quality
 *------------------------------------------------------------*
 capture program drop summary_table_procTraj_Housing
 program define summary_table_procTraj_Housing
@@ -178,25 +148,25 @@ end
 summary_table_procTraj_Housing
 
 *------------------------------------------------------------*
-* 8. Define outcomes
+* 7. Define outcomes
 *------------------------------------------------------------*
 local outcomes "mh_prob_17 poor_exam_17 poor_srh_17 asthma14 police14"
 
 *------------------------------------------------------------*
-* 9. Main complete-case Poisson models
+* 8. Main complete-case Poisson models
 *------------------------------------------------------------*
 foreach y of local outcomes {
     quietly svy: poisson `y' i.traj_ph i.sex i.medu i.meth
     estimates store cc_`y'
 }
 
-esttab cc_mh_prob_17 cc_poor_exam_17 cc_poor_srh_17 cc_asthma14 cc_police17 ///
+esttab cc_mh_prob_17 cc_poor_exam_17 cc_poor_srh_17 cc_asthma14 cc_police14 ///
     using "$output\table_complete_case_poisson.rtf", ///
     replace eform b(%9.2f) se(%9.2f) label ///
     mtitles("Mental health" "Poor exam results" "Poor SRH" "Asthma" "Police contact")
 
 *------------------------------------------------------------*
-* 10. Multiple imputation
+* 9. Multiple imputation
 *------------------------------------------------------------*
 foreach c in _mi_style _mi_m _mi_ivars _mi_rvars _mi_pvars _mi_n _mi_update _mi_passive {
     capture char _dta[`c']
@@ -204,13 +174,13 @@ foreach c in _mi_style _mi_m _mi_ivars _mi_rvars _mi_pvars _mi_n _mi_update _mi_
 
 mi set wide
 
-mi register imputed mh_prob_17 poor_exam_17 poor_srh_17 asthma14 police17 ///
+mi register imputed mh_prob_17 poor_exam_17 poor_srh_17 asthma14 police14 ///
     medu meth
 
 mi register regular mcsid traj_ph sex eovwt2 pttype2 sptn00 nh2
 
 mi impute chained ///
-    (logit) mh_prob_17 poor_exam_17 poor_srh_17 asthma14 police17 ///
+    (logit) mh_prob_17 poor_exam_17 poor_srh_17 asthma14 police14 ///
     (mlogit) medu meth ///
     = i.traj_ph i.sex, add(25) rseed(8787)
 
@@ -228,7 +198,7 @@ esttab mi_mh_prob_17 mi_poor_exam_17 mi_poor_srh_17 mi_asthma14 mi_police17 ///
     mtitles("Mental health" "Poor exam results" "Poor SRH" "Asthma" "Police contact")
 
 *------------------------------------------------------------*
-* 11. Population attributable fractions
+* 10. Population attributable fractions
 *------------------------------------------------------------*
 tempfile pafall
 tempname pafmem
@@ -316,7 +286,7 @@ foreach y of local outcomes {
     estimates store verm_`y'
 }
 
-esttab verm_mh_prob_17 verm_poor_exam_17 verm_poor_srh_17 verm_asthma14 verm_police17 ///
+esttab verm_mh_prob_17 verm_poor_exam_17 verm_poor_srh_17 verm_asthma14 verm_police14 ///
     using "$output\table_vermunt_poisson.rtf", ///
     replace eform b(%9.2f) se(%9.2f) label ///
     mtitles("Mental health" "Poor exam results" "Poor SRH" "Asthma" "Police contact")
